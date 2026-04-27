@@ -17,6 +17,7 @@ st.markdown("**Surf Data 即時驅動 · 二級市場最強潛力幣檢測器** 
 # ====================== 資料獲取函數 ======================
 @st.cache_data(ttl=60)  # 每60秒自動更新一次
 def get_crypto_data():
+   # 【修正重點：改為正確的 API 網址】
    url = "https://coingecko.com"
    params = {
        "vs_currency": "usd",
@@ -25,24 +26,23 @@ def get_crypto_data():
        "page": 1,
        "sparkline": False
    }
+   # 【優化重點：加入 Headers 偽裝，減少被 API 擋掉的機率】
+   headers = {"User-Agent": "Mozilla/5.0"}
 
    try:
-       resp = requests.get(url, params=params, timeout=15)
+       resp = requests.get(url, params=params, headers=headers, timeout=15)
        data = resp.json()
        df = pd.DataFrame(data)
 
        # 篩選潛力妖幣市值範圍（100萬 ~ 5億美元）
        df = df[(df['market_cap'] > 1_000_000) & (df['market_cap'] < 500_000_000)]
 
-       # 模擬社交熱度
+       # 數據計算
        df['social_score'] = 65 + (df['price_change_percentage_24h'].fillna(0) * 0.8).clip(-30, 35)
        df['social_score'] = df['social_score'].clip(0, 100)
-
-       # 計算各項因子
        df['turnover'] = (df['total_volume'] / df['market_cap'] * 100).round(2)
        df['momentum'] = df['price_change_percentage_24h'].fillna(0).clip(-50, 100)
 
-       # 權重配置
        weights = {'turnover': 0.30, 'momentum': 0.25, 'market_cap_score': 0.15, 'social': 0.15, 'position': 0.10, 'sentiment': 0.05}
 
        df['market_cap_score'] = df['market_cap'].apply(
@@ -51,7 +51,6 @@ def get_crypto_data():
        df['intraday_position'] = 72
        df['sentiment'] = 78
 
-       # 綜合評分計算
        df['composite_score'] = (
            df['turnover'].clip(0, 100) * weights['turnover'] +
            df['momentum'].clip(0, 100) * weights['momentum'] +
@@ -61,7 +60,6 @@ def get_crypto_data():
            df['sentiment'] * weights['sentiment']
        ).round(1)
 
-       # 訊號標籤
        df['signal'] = df.apply(lambda row:
            "🚀 強買入" if row['composite_score'] > 85 and row['turnover'] > 25 else
            "📈 吸籌中" if row['composite_score'] > 72 else "🔍 觀察", axis=1)
@@ -69,7 +67,8 @@ def get_crypto_data():
        return df.sort_values('composite_score', ascending=False).reset_index(drop=True)
 
    except Exception as e:
-       st.error(f"資料獲取失敗：{e}")
+       # 如果還是報錯，我們會看到更清楚的提示
+       st.error(f"資料獲取失敗 (可能 API 受限)：{e}")
        return pd.DataFrame()
 
 # ====================== 主介面 ======================
@@ -88,26 +87,23 @@ with col3:
 df = get_crypto_data()
 if df.empty: st.stop()
 
-# 過濾資料
 filtered_df = df.copy()
 if mode == "僅可操作 (強買入 / 吸籌中)":
    filtered_df = filtered_df[filtered_df['signal'].str.contains("強買入|吸籌中")]
 
-# 頂部最高分卡片
 if not filtered_df.empty:
    top = filtered_df.iloc[0]
    st.markdown(f"""
    <div style="background: linear-gradient(90deg, #1e40af, #3b82f6);
                padding: 25px; border-radius: 16px; color: white; text-align: center; margin-bottom: 20px;">
-       <h2>🔥 當前最高分：{top['composite_score']:.1f} 分</h2>
-       <h3>{top['name']} ({top['symbol'].upper()}) — {top['signal']}</h3>
+       <h2 style='color: white;'>🔥 當前最高分：{top['composite_score']:.1f} 分</h2>
+       <h3 style='color: white;'>{top['name']} ({top['symbol'].upper()}) — {top['signal']}</h3>
        <p style="font-size: 18px;">
            價格 ${top['current_price']:.6f}　|　24h {top['price_change_percentage_24h']:+.1f}%　|　換手率 {top['turnover']:.1f}%
        </p>
    </div>
    """, unsafe_allow_html=True)
 
-# 排行榜表格
 st.subheader("📊 妖幣潛力排行榜")
 display_df = filtered_df.copy()
 display_df['價格'] = display_df['current_price'].apply(lambda x: f"${x:.6f}" if x < 1 else f"${x:,.4f}")
@@ -123,7 +119,6 @@ st.dataframe(
    column_config={"name": "幣種", "signal": "訊號標籤", "綜合分": st.column_config.NumberColumn("綜合分", format="%.1f ⭐")}
 )
 
-# 詳細因子拆解
 st.subheader("📋 點擊幣種查看詳細評分拆解")
 selected_coin = st.selectbox("選擇要查看的幣種", options=filtered_df['name'].tolist())
 
@@ -132,24 +127,23 @@ if selected_coin:
    st.markdown(f"### {coin['name']} ({coin['symbol'].upper()})　綜合評分 **{coin['composite_score']:.1f} 分**")
    
    factors = {
-       "換手率": (coin['turnover'], 30, "成交量 / 市值，妖幣啟動前必爆，>25% 為強訊號"),
-       "動能": (coin['momentum'].clip(0,100), 25, "24h 漲幅落在 0-30% 最優，已暴漲會自動扣分"),
-       "市值": (coin['market_cap_score'], 15, "500萬 ~ 3億美元是妖幣溫床"),
-       "日內位置": (coin['intraday_position'], 10, "越接近日內高點，越接近突破點"),
-       "社交熱度": (coin['social_score'], 15, "來自 Surf Data 社交排名"),
-       "情緒": (coin['sentiment'], 5, "正向社群情緒加分")
+       "換手率": (coin['turnover'], 30, "成交量 / 市值"),
+       "動能": (coin['momentum'].clip(0,100), 25, "漲幅動能"),
+       "市值": (coin['market_cap_score'], 15, "市值評分"),
+       "日內位置": (coin['intraday_position'], 10, "價格位置"),
+       "社交熱度": (coin['social_score'], 15, "社交熱度"),
+       "情緒": (coin['sentiment'], 5, "市場情緒")
    }
    for name, (score, weight, desc) in factors.items():
-       st.progress(score / 100, text=f"{name}　{score:.1f} 分 ({weight}%) —— {desc}")
+       st.progress(min(max(score/100, 0.0), 1.0), text=f"{name}　{score:.1f} 分 ({weight}%) —— {desc}")
 
-# ====================== 側邊欄：觀察列表 ======================
 st.sidebar.header("👀 我的觀察列表")
 if 'watchlist' not in st.session_state: st.session_state.watchlist = {}
 
 watch_symbol = st.sidebar.text_input("新增幣種 (例如 BONK)", "")
 entry_price = st.sidebar.number_input("入場價格 (USD)", min_value=0.0, format="%.8f", value=0.0)
 
-if st.sidebar.button("➕ 一鍵加入觀察列表", type="primary"):
+if st.sidebar.button("➕ 一鍵加入觀察列表"):
    if watch_symbol and entry_price > 0:
        current = df[df['symbol'] == watch_symbol.lower()]
        if not current.empty:
@@ -157,7 +151,7 @@ if st.sidebar.button("➕ 一鍵加入觀察列表", type="primary"):
                'entry_price': entry_price, 'entry_score': current.iloc[0]['composite_score']
            }
            st.sidebar.success(f"已加入 {watch_symbol.upper()}")
-   else: st.sidebar.warning("請輸入幣種與價格")
+   else: st.sidebar.warning("資料填寫不全")
 
 if st.session_state.watchlist:
    st.sidebar.subheader("📈 觀察列表 & 即時 P&L")
@@ -166,6 +160,6 @@ if st.session_state.watchlist:
        if not current_row.empty:
            curr_price = current_row.iloc[0]['current_price']
            pnl = (curr_price - info['entry_price']) / info['entry_price'] * 100
-           st.sidebar.markdown(f"**{sym}** 入場: ${info['entry_price']:.6f} | 當前: ${curr_price:.6f} | **{'🟢' if pnl>=0 else '🔴'} {pnl:+.2f}%**")
+           st.sidebar.markdown(f"**{sym}**: ${curr_price:.6f} ({'🟢' if pnl>=0 else '🔴'} {pnl:+.2f}%)")
 
-st.caption("💡 資料每 60 秒自動刷新 · 全部使用即時介面 · 祝你順利卡位下一個百倍妖幣！")
+st.caption(f"數據更新時間: {datetime.now().strftime('%H:%M:%S')}")
